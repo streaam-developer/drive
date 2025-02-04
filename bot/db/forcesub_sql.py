@@ -21,7 +21,7 @@ class Forcesub(BASE):
 
 
 def start() -> scoped_session:
-    engine = create_engine(DATABASE_URL, client_encoding="utf8", poolclass=StaticPool)
+    engine = create_engine(DATABASE_URL, poolclass=StaticPool)
     BASE.metadata.bind = engine
     BASE.metadata.create_all(engine)
     return scoped_session(sessionmaker(bind=engine, autoflush=False))
