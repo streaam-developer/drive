@@ -1,7 +1,5 @@
 import os
-import asyncio
-import aiofiles
-from time import time
+import time
 from pyrogram import Client, filters
 from bot.helpers.sql_helper import gDriveDB, idsDB
 from bot.helpers.utils import CustomFilters, humanbytes
@@ -13,33 +11,29 @@ from pyrogram.errors import FloodWait, RPCError
 from bot.plugins.forcesub import check_forcesub
 from bot.db.ban_sql import is_banned
 
-async def broadcast_stats(client, user_id, message):
-    stats_msg = f"📊 Process Stats: User {user_id} | {message}"
-    for chat in await client.get_chat_members(client.me.id):
-        try:
-            await client.send_message(chat.user.id, stats_msg)
-        except Exception as e:
-            LOGGER.error(f"Failed to send stats to {chat.user.id}: {e}")
-
-async def send_progress(sent_message, file_name, downloaded, total_size, start_time):
-    percent = (downloaded / total_size) * 100
-    elapsed_time = time() - start_time
-    speed = downloaded / elapsed_time if elapsed_time > 0 else 0
-    remaining_time = (total_size - downloaded) / speed if speed > 0 else 0
-    progress_msg = (f"📥 Downloading {file_name}\n"
-                    f"Progress: {humanbytes(downloaded)}/{humanbytes(total_size)} ({percent:.2f}%)\n"
-                    f"Speed: {humanbytes(speed)}/s\n"
-                    f"ETA: {remaining_time:.2f}s")
-    await sent_message.edit(progress_msg)
+def progress_callback(current, total, start_time, sent_message):
+    elapsed_time = time.time() - start_time
+    speed = current / elapsed_time if elapsed_time > 0 else 0
+    remaining_bytes = total - current
+    eta = remaining_bytes / speed if speed > 0 else 0
+    progress_msg = (
+        f"**Progress:** {humanbytes(current)}/{humanbytes(total)}\n"
+        f"**Speed:** {humanbytes(speed)}/s\n"
+        f"**Remaining:** {humanbytes(remaining_bytes)}\n"
+        f"**ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
+    )
+    sent_message.edit(progress_msg)
 
 @Client.on_message(
     filters.private
     & filters.incoming
     & filters.text
     & (filters.command(BotCommands.Download) | filters.regex("^(ht|f)tp*"))
+    & CustomFilters.auth_users
 )
 async def _download(client, message):
     user_id = message.from_user.id
+
     if await is_banned(user_id):
         await message.reply_text("You are banned from using this bot.", quote=True)
         return
@@ -48,73 +42,73 @@ async def _download(client, message):
         return
 
     sent_message = await message.reply_text("🕵️**Checking link...**", quote=True)
-    link = message.text if not message.command else message.command[1]
+    link = message.text.strip() if not message.command else message.command[1]
+    filename = os.path.basename(link)
+    dl_path = os.path.join(DOWNLOAD_DIRECTORY, filename)
     
-    if "drive.google.com" in link:
-        await sent_message.edit(Messages.CLONING.format(link))
-        LOGGER.info(f"Copy:{user_id}: {link}")
-        msg = GoogleDrive(user_id).clone(link)
-        await sent_message.edit(msg)
-    else:
-        filename = os.path.basename(link.split("|")[0].strip())
-        dl_path = os.path.join(DOWNLOAD_DIRECTORY, filename)
-        
-        LOGGER.info(f"Download:{user_id}: {link}")
-        await sent_message.edit(Messages.DOWNLOADING.format(link))
-        start_time = time()
-        
-        result, file_path, total_size = await asyncio.to_thread(download_file, link, dl_path, send_progress, sent_message, filename, start_time)
-        
-        if result:
-            elapsed_time = time() - start_time
-            await sent_message.edit(
-                Messages.DOWNLOADED_SUCCESSFULLY.format(
-                    os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
-                )
+    LOGGER.info(f"Download:{user_id}: {link}")
+    await sent_message.edit(Messages.DOWNLOADING.format(link))
+    
+    start_time = time.time()
+    result, file_path = download_file(link, dl_path, progress_callback, start_time, sent_message)
+    
+    if result:
+        await sent_message.edit(
+            Messages.DOWNLOADED_SUCCESSFULLY.format(
+                os.path.basename(file_path),
+                humanbytes(os.path.getsize(file_path))
             )
-            upload_start = time()
-            msg = await asyncio.to_thread(GoogleDrive(user_id).upload_file, file_path)
-            upload_time = time() - upload_start
-            await sent_message.edit(msg + f"\n🚀 Upload Speed: {humanbytes(os.path.getsize(file_path)/upload_time)}/s")
-            os.remove(file_path)
-            await broadcast_stats(client, user_id, f"Downloaded {filename} in {elapsed_time:.2f}s and uploaded in {upload_time:.2f}s")
-        else:
-            await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
+        )
+        msg = GoogleDrive(user_id).upload_file(file_path, progress_callback, start_time, sent_message)
+        await sent_message.edit(msg)
+        os.remove(file_path)
+    else:
+        await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
 
 @Client.on_message(
-    filters.incoming
-    & filters.private
-    & filters.command(BotCommands.YtDl)
+    filters.private
+    & filters.incoming
+    & (filters.document | filters.audio | filters.video | filters.photo)
+    & CustomFilters.auth_users
 )
-async def _ytdl(client, message):
+async def _telegram_file(client, message):
     user_id = message.from_user.id
+
     if await is_banned(user_id):
         await message.reply_text("You are banned from using this bot.", quote=True)
         return
 
     if not await check_forcesub(client, message, user_id):
         return
-    
-    if len(message.command) > 1:
-        sent_message = await message.reply_text("🕵️**Checking Link...**", quote=True)
-        link = message.command[1]
-        
-        LOGGER.info(f"YTDL:{user_id}: {link}")
-        await sent_message.edit(Messages.DOWNLOADING.format(link))
-        start_time = time()
-        result, file_path = await asyncio.to_thread(utube_dl, link)
-        
-        if result:
-            elapsed_time = time() - start_time
-            await sent_message.edit(
-                Messages.DOWNLOADED_SUCCESSFULLY.format(os.path.basename(file_path), humanbytes(os.path.getsize(file_path)))
+
+    sent_message = await message.reply_text("🕵️**Checking File...**", quote=True)
+    if message.document:
+        file = message.document
+    elif message.video:
+        file = message.video
+    elif message.audio:
+        file = message.audio
+    elif message.photo:
+        file = message.photo
+        file.mime_type = "images/png"
+        file.file_name = f"IMG-{user_id}-{message.id}.png"
+    await sent_message.edit(
+        Messages.DOWNLOAD_TG_FILE.format(
+            file.file_name, humanbytes(file.file_size), file.mime_type
+        )
+    )
+    LOGGER.info(f"Download:{user_id}: {file.file_name}")
+    try:
+        start_time = time.time()
+        file_path = await message.download(file_name=DOWNLOAD_DIRECTORY, progress=progress_callback, start_time=start_time, sent_message=sent_message)
+        await sent_message.edit(
+            Messages.DOWNLOADED_SUCCESSFULLY.format(
+                os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
             )
-            msg = await asyncio.to_thread(GoogleDrive(user_id).upload_file, file_path)
-            upload_time = time() - start_time
-            await sent_message.edit(msg + f"\n🚀 Upload Speed: {humanbytes(os.path.getsize(file_path)/upload_time)}/s")
-            os.remove(file_path)
-            await broadcast_stats(client, user_id, f"Downloaded {file_path} in {elapsed_time:.2f}s and uploaded in {upload_time:.2f}s")
-        else:
-            await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
-    else:
-        await message.reply_text(Messages.PROVIDE_YTDL_LINK, quote=True)
+        )
+        msg = GoogleDrive(user_id).upload_file(file_path, progress_callback, start_time, sent_message)
+        await sent_message.edit(msg)
+    except RPCError:
+        await sent_message.edit(Messages.WENT_WRONG)
+    LOGGER.info(f"Deleting: {file_path}")
+    os.remove(file_path)
