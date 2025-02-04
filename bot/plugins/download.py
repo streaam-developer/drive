@@ -17,7 +17,7 @@ from bot.db.ban_sql import is_banned
     & filters.incoming
     & filters.text
     & (filters.command(BotCommands.Download) | filters.regex("^(ht|f)tp*"))
-    & CustomFilters.auth_users
+    
 )
 async def _download(client, message):
     user_id = message.from_user.id
@@ -72,7 +72,7 @@ async def _download(client, message):
     filters.private
     & filters.incoming
     & (filters.document | filters.audio | filters.video | filters.photo)
-    & CustomFilters.auth_users
+    
 )
 async def _telegram_file(client, message):
     user_id = message.from_user.id
@@ -120,7 +120,7 @@ async def _telegram_file(client, message):
     filters.incoming
     & filters.private
     & filters.command(BotCommands.YtDl)
-    & CustomFilters.auth_users
+    
 )
 async def _ytdl(client, message):
     user_id = message.from_user.id
