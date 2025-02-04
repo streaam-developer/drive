@@ -5,7 +5,7 @@ from bot.helpers.sql_helper import SESSION, BASE
 class ParentID(BASE):
     __tablename__ = "ParentID"
     chat_id = Column(String(255), primary_key=True)
-    parent_id = Column(String)
+    parent_id = Column(String(255))
 
     def __init__(self, chat_id, parent_id):
         self.chat_id = chat_id
