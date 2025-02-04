@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from pyrogram import Client, filters
 from bot.helpers.sql_helper import gDriveDB, idsDB
 from bot.helpers.utils import CustomFilters, humanbytes
@@ -23,48 +24,6 @@ def progress_callback(current, total):
         f"**ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
     )
     progress_callback.sent_message.edit(progress_msg)
-
-@Client.on_message(
-    filters.private
-    & filters.incoming
-    & filters.text
-    & (filters.command(BotCommands.Download) | filters.regex("^(ht|f)tp*"))
-    & CustomFilters.auth_users
-)
-async def _download(client, message):
-    user_id = message.from_user.id
-
-    if await is_banned(user_id):
-        await message.reply_text("You are banned from using this bot.", quote=True)
-        return
-
-    if not await check_forcesub(client, message, user_id):
-        return
-
-    sent_message = await message.reply_text("🕵️**Checking link...**", quote=True)
-    link = message.text.strip() if not message.command else message.command[1]
-    filename = os.path.basename(link)
-    dl_path = os.path.join(DOWNLOAD_DIRECTORY, filename)
-    
-    LOGGER.info(f"Download:{user_id}: {link}")
-    await sent_message.edit(Messages.DOWNLOADING.format(link))
-    
-    progress_callback.start_time = time.time()
-    progress_callback.sent_message = sent_message
-    result, file_path = download_file(link, dl_path, progress_callback)
-    
-    if result:
-        await sent_message.edit(
-            Messages.DOWNLOADED_SUCCESSFULLY.format(
-                os.path.basename(file_path),
-                humanbytes(os.path.getsize(file_path))
-            )
-        )
-        msg = GoogleDrive(user_id).upload_file(file_path, progress_callback)
-        await sent_message.edit(msg)
-        os.remove(file_path)
-    else:
-        await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
 
 @Client.on_message(
     filters.private
@@ -110,6 +69,48 @@ async def _telegram_file(client, message):
     os.remove(file_path)
 
 @Client.on_message(
+    filters.private
+    & filters.incoming
+    & filters.text
+    & (filters.command(BotCommands.Download) | filters.regex("^(ht|f)tp*"))
+    & CustomFilters.auth_users
+)
+async def _download(client, message):
+    user_id = message.from_user.id
+
+    if await is_banned(user_id):
+        await message.reply_text("You are banned from using this bot.", quote=True)
+        return
+
+    if not await check_forcesub(client, message, user_id):
+        return
+
+    sent_message = await message.reply_text("🕵️**Checking link...**", quote=True)
+    link = message.text.strip() if not message.command else message.command[1]
+    filename = os.path.basename(link)
+    dl_path = os.path.join(DOWNLOAD_DIRECTORY, filename)
+    
+    LOGGER.info(f"Download:{user_id}: {link}")
+    await sent_message.edit(Messages.DOWNLOADING.format(link))
+    
+    progress_callback.start_time = time.time()
+    progress_callback.sent_message = sent_message
+    result, file_path = await asyncio.to_thread(download_file, link, dl_path, progress_callback, multi_thread=True)
+    
+    if result:
+        await sent_message.edit(
+            Messages.DOWNLOADED_SUCCESSFULLY.format(
+                os.path.basename(file_path),
+                humanbytes(os.path.getsize(file_path))
+            )
+        )
+        msg = await asyncio.to_thread(GoogleDrive(user_id).upload_file, file_path, progress_callback)
+        await sent_message.edit(msg)
+        os.remove(file_path)
+    else:
+        await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
+
+@Client.on_message(
     filters.incoming
     & filters.private
     & filters.command(BotCommands.YtDl)
@@ -131,14 +132,14 @@ async def _ytdl(client, message):
         await sent_message.edit(Messages.DOWNLOADING.format(link))
         progress_callback.start_time = time.time()
         progress_callback.sent_message = sent_message
-        result, file_path = utube_dl(link, progress_callback)
+        result, file_path = await asyncio.to_thread(utube_dl, link)
         if result:
             await sent_message.edit(
                 Messages.DOWNLOADED_SUCCESSFULLY.format(
                     os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
                 )
             )
-            msg = GoogleDrive(user_id).upload_file(file_path, progress_callback)
+            msg = await asyncio.to_thread(GoogleDrive(user_id).upload_file, file_path, progress_callback)
             await sent_message.edit(msg)
             os.remove(file_path)
         else:
