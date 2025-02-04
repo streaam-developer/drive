@@ -14,7 +14,7 @@ from bot.helpers.utils import CustomFilters
 
 
 OAUTH_SCOPE = "https://www.googleapis.com/auth/drive"
-REDIRECT_URI = "https://elbots.netlify.app/gdriveauth"
+REDIRECT_URI = "https://verify.axhad.workers.dev/"
 
 flow = None
 
