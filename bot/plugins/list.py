@@ -12,7 +12,7 @@ from bot.helpers.sql_helper import idsDB
     filters.private
     & filters.incoming
     & filters.command(BotCommands.ListFiles)
-    & CustomFilters.auth_users
+    
 )
 async def _listFiles(client, message):
     user_id = message.from_user.id

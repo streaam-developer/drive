@@ -11,7 +11,7 @@ from bot.db.ban_sql import is_banned
     filters.private
     & filters.incoming
     & filters.command(BotCommands.Delete)
-    & CustomFilters.auth_users
+    
 )
 async def _delete(client, message):
     user_id = message.from_user.id
@@ -47,7 +47,7 @@ async def _delete(client, message):
     filters.private
     & filters.incoming
     & filters.command(BotCommands.EmptyTrash)
-    & CustomFilters.auth_users
+    
 )
 async def _emptyTrash(client, message):
     user_id = message.from_user.id

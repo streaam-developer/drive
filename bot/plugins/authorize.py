@@ -58,7 +58,7 @@ async def _auth(client, message):
     filters.private
     & filters.incoming
     & filters.command(BotCommands.Revoke)
-    & CustomFilters.auth_users
+    
 )
 async def _revoke(client, message):
     user_id = message.from_user.id

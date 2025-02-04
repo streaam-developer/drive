@@ -10,7 +10,7 @@ from bot import LOGGER
     filters.private
     & filters.incoming
     & filters.command(BotCommands.SetFolder)
-    & CustomFilters.auth_users
+    
 )
 async def _set_parent(client, message):
     user_id = message.from_user.id

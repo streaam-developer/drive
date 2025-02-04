@@ -11,7 +11,7 @@ from bot.db.ban_sql import is_banned
     filters.private
     & filters.incoming
     & filters.command(BotCommands.Clone)
-    & CustomFilters.auth_users
+    
 )
 async def _clone(client, message):
     user_id = message.from_user.id
