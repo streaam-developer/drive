@@ -1,10 +1,12 @@
 import os
 import time
 import asyncio
+import aiohttp
+from tqdm import tqdm
 from pyrogram import Client, filters
 from bot.helpers.sql_helper import gDriveDB, idsDB
 from bot.helpers.utils import CustomFilters, humanbytes
-from bot.helpers.downloader import download_file, utube_dl
+from bot.helpers.downloader import utube_dl
 from bot.helpers.gdrive_utils import GoogleDrive
 from bot import DOWNLOAD_DIRECTORY, LOGGER
 from bot.config import Messages, BotCommands
@@ -12,61 +14,76 @@ from pyrogram.errors import FloodWait, RPCError
 from bot.plugins.forcesub import check_forcesub
 from bot.db.ban_sql import is_banned
 
-def progress_callback(current, total):
-    elapsed_time = time.time() - progress_callback.start_time
-    speed = current / elapsed_time if elapsed_time > 0 else 0
-    remaining_bytes = total - current
-    eta = remaining_bytes / speed if speed > 0 else 0
-    progress_msg = (
-        f"**Progress:** {humanbytes(current)}/{humanbytes(total)}\n"
-        f"**Speed:** {humanbytes(speed)}/s\n"
-        f"**Remaining:** {humanbytes(remaining_bytes)}\n"
-        f"**ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
-    )
-    progress_callback.sent_message.edit(progress_msg)
+# Task queue for each user
+user_tasks = {}
 
-@Client.on_message(
-    filters.private
-    & filters.incoming
-    & (filters.document | filters.audio | filters.video | filters.photo)
-    & CustomFilters.auth_users
-)
-async def _telegram_file(client, message):
-    user_id = message.from_user.id
+async def download_file_with_progress(url, destination, sent_message):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024  # 1 KB
+            progress = tqdm(total=total_size, unit='B', unit_scale=True, desc=os.path.basename(destination))
+            with open(destination, 'wb') as f:
+                start_time = time.time()
+                while True:
+                    chunk = await response.content.read(block_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    progress.update(len(chunk))
+                    elapsed_time = time.time() - start_time
+                    download_speed = progress.n / elapsed_time if elapsed_time > 0 else 0
+                    progress.set_postfix(speed=f"{humanbytes(download_speed)}/s", 
+                                        remaining=f"{humanbytes(total_size - progress.n)}")
+                    # Update progress in Telegram
+                    await sent_message.edit(
+                        Messages.DOWNLOADING.format(
+                            os.path.basename(destination),
+                            humanbytes(progress.n),
+                            humanbytes(total_size),
+                            f"{humanbytes(download_speed)}/s",
+                            f"{humanbytes(total_size - progress.n)} remaining"
+                        )
+                    )
+            progress.close()
+    return True, destination
 
-    if await is_banned(user_id):
-        await message.reply_text("You are banned from using this bot.", quote=True)
-        return
-
-    if not await check_forcesub(client, message, user_id):
-        return
-
-    sent_message = await message.reply_text("🕵️**Checking File...**", quote=True)
-    file = message.document or message.video or message.audio or message.photo
-    if message.photo:
-        file.mime_type = "images/png"
-        file.file_name = f"IMG-{user_id}-{message.id}.png"
-    await sent_message.edit(
-        Messages.DOWNLOAD_TG_FILE.format(
-            file.file_name, humanbytes(file.file_size), file.mime_type
-        )
-    )
-    LOGGER.info(f"Download:{user_id}: {file.file_name}")
-    try:
-        progress_callback.start_time = time.time()
-        progress_callback.sent_message = sent_message
-        file_path = await message.download(file_name=DOWNLOAD_DIRECTORY, progress=progress_callback)
-        await sent_message.edit(
-            Messages.DOWNLOADED_SUCCESSFULLY.format(
-                os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
+async def upload_file_with_progress(file_path, mime_type, sent_message, user_id):
+    total_size = os.path.getsize(file_path)
+    progress = tqdm(total=total_size, unit='B', unit_scale=True, desc=os.path.basename(file_path))
+    start_time = time.time()
+    
+    def callback(uploaded_bytes):
+        progress.update(uploaded_bytes - progress.n)
+        elapsed_time = time.time() - start_time
+        upload_speed = progress.n / elapsed_time if elapsed_time > 0 else 0
+        progress.set_postfix(speed=f"{humanbytes(upload_speed)}/s", 
+                            remaining=f"{humanbytes(total_size - progress.n)}")
+        # Update progress in Telegram
+        asyncio.create_task(sent_message.edit(
+            Messages.UPLOADING.format(
+                os.path.basename(file_path),
+                humanbytes(progress.n),
+                humanbytes(total_size),
+                f"{humanbytes(upload_speed)}/s",
+                f"{humanbytes(total_size - progress.n)} remaining"
             )
-        )
-        msg = GoogleDrive(user_id).upload_file(file_path, progress_callback)
-        await sent_message.edit(msg)
-    except RPCError:
-        await sent_message.edit(Messages.WENT_WRONG)
-    LOGGER.info(f"Deleting: {file_path}")
-    os.remove(file_path)
+        ))
+    
+    msg = GoogleDrive(user_id).upload_file(file_path, mime_type, callback)
+    progress.close()
+    return msg
+
+async def process_user_queue(user_id, client, sent_message, task):
+    if user_id not in user_tasks:
+        user_tasks[user_id] = asyncio.Queue()
+    
+    await user_tasks[user_id].put(task)
+    
+    while not user_tasks[user_id].empty():
+        current_task = await user_tasks[user_id].get()
+        await current_task(client, sent_message)
+        user_tasks[user_id].task_done()
 
 @Client.on_message(
     filters.private
@@ -85,30 +102,98 @@ async def _download(client, message):
     if not await check_forcesub(client, message, user_id):
         return
 
-    sent_message = await message.reply_text("🕵️**Checking link...**", quote=True)
-    link = message.text.strip() if not message.command else message.command[1]
-    filename = os.path.basename(link)
-    dl_path = os.path.join(DOWNLOAD_DIRECTORY, filename)
-    
-    LOGGER.info(f"Download:{user_id}: {link}")
-    await sent_message.edit(Messages.DOWNLOADING.format(link))
-    
-    progress_callback.start_time = time.time()
-    progress_callback.sent_message = sent_message
-    result, file_path = await asyncio.to_thread(download_file, link, dl_path, progress_callback, multi_thread=True)
-    
-    if result:
+    if not message.media:
+        sent_message = await message.reply_text("🕵️**Checking link...**", quote=True)
+        if message.command:
+            link = message.command[1]
+        else:
+            link = message.text
+
+        async def download_task(client, sent_message):
+            if "drive.google.com" in link:
+                await sent_message.edit(Messages.CLONING.format(link))
+                LOGGER.info(f"Copy:{user_id}: {link}")
+                msg = GoogleDrive(user_id).clone(link)
+                await sent_message.edit(msg)
+            else:
+                if "|" in link:
+                    link, filename = link.split("|")
+                    link = link.strip()
+                    filename.strip()
+                    dl_path = os.path.join(f"{DOWNLOAD_DIRECTORY}/{filename}")
+                else:
+                    link = link.strip()
+                    filename = os.path.basename(link)
+                    dl_path = DOWNLOAD_DIRECTORY
+                LOGGER.info(f"Download:{user_id}: {link}")
+                await sent_message.edit(Messages.DOWNLOADING.format(link))
+                result, file_path = await download_file_with_progress(link, dl_path, sent_message)
+                if result == True:
+                    await sent_message.edit(
+                        Messages.DOWNLOADED_SUCCESSFULLY.format(
+                            os.path.basename(file_path),
+                            humanbytes(os.path.getsize(file_path)),
+                        )
+                    )
+                    msg = await upload_file_with_progress(file_path, None, sent_message, user_id)
+                    await sent_message.edit(msg)
+                    LOGGER.info(f"Deleteing: {file_path}")
+                    os.remove(file_path)
+                else:
+                    await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
+
+        await process_user_queue(user_id, client, sent_message, download_task)
+
+@Client.on_message(
+    filters.private
+    & filters.incoming
+    & (filters.document | filters.audio | filters.video | filters.photo)
+    & CustomFilters.auth_users
+)
+async def _telegram_file(client, message):
+    user_id = message.from_user.id
+
+    if await is_banned(user_id):
+        await message.reply_text("You are banned from using this bot.", quote=True)
+        return
+
+    if not await check_forcesub(client, message, user_id):
+        return
+
+    sent_message = await message.reply_text("🕵️**Checking File...**", quote=True)
+    if message.document:
+        file = message.document
+    elif message.video:
+        file = message.video
+    elif message.audio:
+        file = message.audio
+    elif message.photo:
+        file = message.photo
+        file.mime_type = "images/png"
+        file.file_name = f"IMG-{user_id}-{message.id}.png"
+
+    async def upload_task(client, sent_message):
         await sent_message.edit(
-            Messages.DOWNLOADED_SUCCESSFULLY.format(
-                os.path.basename(file_path),
-                humanbytes(os.path.getsize(file_path))
+            Messages.DOWNLOAD_TG_FILE.format(
+                file.file_name, humanbytes(file.file_size), file.mime_type
             )
         )
-        msg = await asyncio.to_thread(GoogleDrive(user_id).upload_file, file_path, progress_callback)
-        await sent_message.edit(msg)
+        LOGGER.info(f"Download:{user_id}: {file.file_name}")
+        try:
+            file_path = await message.download(file_name=DOWNLOAD_DIRECTORY)
+            await sent_message.edit(
+                Messages.DOWNLOADED_SUCCESSFULLY.format(
+                    os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
+                )
+            )
+            msg = await upload_file_with_progress(file_path, file.mime_type, sent_message, user_id)
+            await sent_message.edit(msg)
+        except RPCError:
+            await sent_message.edit(Messages.WENT_WRONG)
+        LOGGER.info(f"Deleteing: {file_path}")
         os.remove(file_path)
-    else:
-        await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
+
+    await process_user_queue(user_id, client, sent_message, upload_task)
 
 @Client.on_message(
     filters.incoming
@@ -125,24 +210,28 @@ async def _ytdl(client, message):
 
     if not await check_forcesub(client, message, user_id):
         return
+
     if len(message.command) > 1:
         sent_message = await message.reply_text("🕵️**Checking Link...**", quote=True)
         link = message.command[1]
-        LOGGER.info(f"YTDL:{user_id}: {link}")
-        await sent_message.edit(Messages.DOWNLOADING.format(link))
-        progress_callback.start_time = time.time()
-        progress_callback.sent_message = sent_message
-        result, file_path = await asyncio.to_thread(utube_dl, link)
-        if result:
-            await sent_message.edit(
-                Messages.DOWNLOADED_SUCCESSFULLY.format(
-                    os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
+
+        async def ytdl_task(client, sent_message):
+            LOGGER.info(f"YTDL:{user_id}: {link}")
+            await sent_message.edit(Messages.DOWNLOADING.format(link))
+            result, file_path = await download_file_with_progress(link, DOWNLOAD_DIRECTORY, sent_message)
+            if result:
+                await sent_message.edit(
+                    Messages.DOWNLOADED_SUCCESSFULLY.format(
+                        os.path.basename(file_path), humanbytes(os.path.getsize(file_path))
+                    )
                 )
-            )
-            msg = await asyncio.to_thread(GoogleDrive(user_id).upload_file, file_path, progress_callback)
-            await sent_message.edit(msg)
-            os.remove(file_path)
-        else:
-            await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
+                msg = await upload_file_with_progress(file_path, None, sent_message, user_id)
+                await sent_message.edit(msg)
+                LOGGER.info(f"Deleteing: {file_path}")
+                os.remove(file_path)
+            else:
+                await sent_message.edit(Messages.DOWNLOAD_ERROR.format(file_path, link))
+
+        await process_user_queue(user_id, client, sent_message, ytdl_task)
     else:
         await message.reply_text(Messages.PROVIDE_YTDL_LINK, quote=True)
