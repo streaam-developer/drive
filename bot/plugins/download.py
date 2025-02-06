@@ -18,12 +18,22 @@ from bot.db.ban_sql import is_banned
 user_tasks = {}
 
 async def download_file_with_progress(url, destination, sent_message):
+    import os
+
+    # Ensure the download directory exists
+    os.makedirs(destination, exist_ok=True)
+
+    # Extract a filename from the URL or generate one if missing
+    filename = os.path.basename(url) if "." in os.path.basename(url) else f"downloaded_file.mp4"
+    destination_file = os.path.join(destination, filename)
+
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             total_size = int(response.headers.get('content-length', 0))
             block_size = 1024  # 1 KB
-            progress = tqdm(total=total_size, unit='B', unit_scale=True, desc=os.path.basename(destination))
-            with open(destination, 'wb') as f:
+            progress = tqdm(total=total_size, unit='B', unit_scale=True, desc=filename)
+
+            with open(destination_file, 'wb') as f:
                 start_time = time.time()
                 while True:
                     chunk = await response.content.read(block_size)
@@ -38,7 +48,7 @@ async def download_file_with_progress(url, destination, sent_message):
                     # Update progress in Telegram
                     await sent_message.edit(
                         Messages.DOWNLOADING.format(
-                            os.path.basename(destination),
+                            filename,
                             humanbytes(progress.n),
                             humanbytes(total_size),
                             f"{humanbytes(download_speed)}/s",
@@ -46,7 +56,8 @@ async def download_file_with_progress(url, destination, sent_message):
                         )
                     )
             progress.close()
-    return True, destination
+
+    return True, destination_file
 
 async def upload_file_with_progress(file_path, mime_type, sent_message, user_id):
     total_size = os.path.getsize(file_path)
